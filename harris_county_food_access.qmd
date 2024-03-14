@@ -1,0 +1,255 @@
+---
+title: "Harris County Food Access Analysis"
+author: "Sammy Cervantes"
+format: html
+editor: visual
+---
+
+In this exercise I conducted an analysis of food access within Harris County, utilizing data from the American Community Survey (ACS) in conjunction with the USDA's Food Access Research Atlas. I aimed to discern patterns of food access across various neighborhood types delineated by race.
+
+# Libraries
+
+```{r, echo=FALSE}
+
+library(tidyverse)
+library(tidycensus)
+library(janitor)
+library(mapview)
+library(plotly)
+ 
+```
+
+# Data
+
+## ACS
+
+```{r, echo=TRUE, warning=FALSE}
+
+# get acs19 5-year data
+harris_acs19 <-get_acs(geography = "tract",
+                  state = "TX",
+                  county = "Harris County",
+                  year = 2019,
+                  survey = "acs5",
+                  variables=c("B03002_001E", 
+                              "B03002_001E",
+                              "B03002_003E",
+                              "B03002_004E",
+                              "B03002_006E",
+                              "B03002_007E",
+                              "B03002_005E",
+                              "B03002_008E",
+                              "B03002_009E",
+                              "B03002_012E"),
+                  geometry = T, 
+                  output = "wide") 
+
+# check structure
+glimpse(harris_acs19)
+```
+
+## Food Desert
+
+```{r, echo=TRUE}
+
+atlas <- read_csv("Food Access Research Atlas.csv")
+
+```
+
+# Clean
+
+```{r}
+
+# rename variables
+harris_acs19 <- harris_acs19 %>% 
+  mutate(totpop = B03002_001E,
+         white = B03002_003E,
+         black = B03002_004E,
+         aapi = B03002_006E + B03002_007E, 
+         aian = B03002_005E, 
+         multi_race = B03002_008E + B03002_009E,
+         hisp_lat = B03002_012E,
+         white_pct = white/totpop,
+         black_pct = black/totpop,
+         aapi_pct = aapi/totpop,
+         aian_pct = aian/totpop,
+         multi_race_pct = multi_race/totpop,
+         hisp_lat_pct = hisp_lat/totpop)
+
+# calculation for race/ethnic majorities
+# filter those whit population less than 0 
+harris_acs19 <- harris_acs19 %>%
+  mutate(neighb_race = case_when(
+    harris_acs19$white_pct > 0.5 ~ "Majority White",
+    harris_acs19$black_pct > 0.5 ~ "Majority Black",
+    harris_acs19$aapi_pct  > 0.5 ~ "Majority AAPI",
+    harris_acs19$aian_pct > 0.5 ~ "Majority AIAN",
+    harris_acs19$multi_race_pct > 0.5 ~ "Majority Multiracial",
+    harris_acs19$hisp_lat_pct> 0.5 ~ "Majority Hispanic/Latino",
+    TRUE ~ "Racially Diverse"
+  )) %>% 
+  filter(totpop > 0)
+
+head(harris_acs19)
+
+# check 
+summary(harris_acs19$totpop)
+
+table(harris_acs19$neighb_race, useNA = "always")
+
+```
+
+We have identified the distribution of racial and ethnic majority tracts as follows. This will be our benchmark for further analysis.
+
+-   Majority Black tracts: 74
+
+-   Majority Hispanic/Latino: 298
+
+-   Majority White: 208
+
+-   Racially Diverse: 206
+
+Explore tracts in Harris County categorized by racial and ethnic majorities
+
+```{r}
+mapview(harris_acs19, zcol = "neighb_race")
+```
+
+# Merge
+
+```{r}
+
+harris_food <- harris_acs19 %>%
+  rename(CensusTract = GEOID) %>%
+  mutate(CensusTract = as.numeric(CensusTract)) %>%
+  left_join(atlas, by = 'CensusTract') %>%
+  clean_names() %>%
+  as.data.frame()
+
+# check merge
+harris_food %>%
+  select(census_tract, white, black, aapi, aian, multi_race, 
+         hisp_lat, lila_tracts_1and10) %>% 
+  head()
+```
+
+## **Analysis**
+
+I will now calculate the percentage of tracts classified as food deserts within racial and ethnic majority areas. Majority Black and Hispanic/Latino census tracts in Harris County experience higher rates of food desert incidence compared to Majority White tracts. Moreover, Black neighborhoods are disproportionately represented as food deserts compared to their share of total tracts.
+
+```{r}
+
+# analysis
+neigh_food_desert <- harris_food %>%
+  group_by(neighb_race) %>%
+  summarise(
+    count_food_desert = sum(lila_tracts_1and10), 
+    total_tracts = n(),
+    pct_food_desert = mean(lila_tracts_1and10))
+
+# visz
+neigh_food_desert %>%
+  mutate(pct_tracts = total_tracts / sum(total_tracts)) %>%
+  select(neighb_race, pct_food_desert, pct_tracts) %>%
+  pivot_longer(
+    cols = c(pct_food_desert, pct_tracts),
+    names_to = 'group',
+    values_to = 'pct'
+  ) %>%
+  ggplot(aes(x = neighb_race, y = pct, fill = group)) +
+    geom_col(width = 0.65, position = 'dodge') +
+    labs(
+      x = NULL, 
+      y = NULL, 
+      title = 'Black Neighborhoods Disproportionately Encounter Food Access Challenges in Harris County',
+      fill = 'Percent of '
+    ) +
+  geom_text(aes(label = round(pct * 100, 0)),
+            position = position_dodge(0.65),
+            vjust = 1.25,
+            color = 'white',
+            fontface = 'bold') +
+  scale_y_continuous(label = scales::percent) +
+  scale_fill_manual(values = c("pct_food_desert" = "#FC887B", "pct_tracts" = "#94CCE0"),
+                    labels = c("Low Food Access", "Total Tracts")) +
+    theme_classic() +
+    theme(plot.title.position = 'plot', 
+          legend.position = 'top')
+  
+```
+
+We will now calculate the count and percentage of residents by race and ethnicity who reside in food desert tracts.
+
+```{r}
+
+# analysis
+table_harris_food <- harris_food %>% 
+  select(census_tract, white, black, aapi, aian, multi_race, hisp_lat, lila_tracts_1and10) %>% 
+  pivot_longer(
+    cols = !c(lila_tracts_1and10, census_tract),
+    names_to = 'race_eth',
+    values_to = 'pop'
+  ) %>% 
+  group_by(race_eth) %>% 
+  summarise(
+    food_desert = sum(pop[lila_tracts_1and10 == 1]),
+    not_food_desert = sum(pop[lila_tracts_1and10 == 0])  
+    ) %>% 
+  mutate(
+    total_pop = food_desert + not_food_desert,
+    per_food_desert = food_desert/total_pop 
+  ) %>% 
+  arrange(desc(per_food_desert))
+
+
+table_harris_food
+
+# vizs
+table_harris_food %>% 
+  select(race_eth, food_desert) %>% 
+  mutate(race_eth = case_when(
+    race_eth == 'hisp_lat' ~ 'Hispanic/Latino',
+    race_eth == 'black' ~ 'Black',
+    race_eth == 'white' ~ 'White',
+    race_eth == 'aapi' ~ 'AAPI',
+    race_eth == 'multi_race' ~ 'Multiracial',
+    race_eth == 'aian' ~ 'AIAN')) %>% 
+  ggplot(aes(x = reorder(race_eth, -food_desert), y = food_desert)) +
+    geom_col(width = 0.65, fill = "#FC887B") +
+    labs(y = 'Low access to good food',
+         x = NULL, 
+         title = '360,000 Latinos Lack Access to Quality Food in Harris County') +
+    scale_y_continuous(label = scales::comma) + 
+    theme_classic() +
+    theme(plot.title.position = 'plot')
+  
+    
+
+```
+
+The scatter plot illustrates that neighborhoods with limited access to quality food tend to have fewer White residents and, concurrently, experience higher levels of poverty.
+
+```{r}
+
+
+plt <- harris_food %>% 
+  mutate(lila_tracts_1and10 = ifelse(lila_tracts_1and10 == 1, 'Limited', 'Good')) %>% 
+  ggplot(aes(x = white_pct, y = poverty_rate/100, color = lila_tracts_1and10)) +
+  geom_point(alpha = 0.75) +
+  labs(
+      x = 'Percent of White Residents', 
+      y = 'Poverty Rate', 
+      title = 'Neighborhoods with limited access to quality food have less White residents\nand experience higher levels of poverty',
+      color = 'Quality of Food Access'
+    ) +
+  scale_x_continuous(label = scales::percent) +
+  scale_y_continuous(label = scales::percent) +
+  scale_color_manual(values = c("Limited" = "#FC887B", "Good" = "#94CCE0")) +
+    theme_classic() +
+    theme(plot.title.position = 'plot', 
+          legend.position = 'top')
+
+ggplotly(plt) %>%
+  layout(legend = list(orientation = "h", x = 0.3, y = 0.9))
+
+```
